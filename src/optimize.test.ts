@@ -4,6 +4,7 @@ import { extname, join } from "node:path";
 import { ffmpeg } from "./ffmpeg.ts";
 import { resolveOptions } from "./options.ts";
 import { optimizeAsset } from "./optimize.ts";
+import { STRICT_GATE } from "./quality.ts";
 
 const ASSETS = join(import.meta.dir, "..", "example", "assets");
 const CACHE = join(import.meta.dir, "..", "node_modules", ".cache", "bun-optimize-plugin-test");
@@ -179,8 +180,136 @@ test("a file that cannot be decoded is kept, not thrown on", async () => {
 
 test("a changed quality setting misses the cache", async () => {
   const source = join(ASSETS, "sample.jpg");
-  const lossy = await optimizeAsset(source, resolveOptions({ cacheDir: CACHE, tryLossless: false, quality: 40 }));
-  const better = await optimizeAsset(source, resolveOptions({ cacheDir: CACHE, tryLossless: false, quality: 90 }));
+  const pinned = { cacheDir: CACHE, tryLossless: false, gate: false as const };
+  const lossy = await optimizeAsset(source, resolveOptions({ ...pinned, quality: 40 }));
+  const better = await optimizeAsset(source, resolveOptions({ ...pinned, quality: 90 }));
   expect(lossy.path).not.toBe(better.path);
   expect(lossy.outputSize).toBeLessThan(better.outputSize);
+});
+
+test("a changed gate misses the cache", async () => {
+  const source = join(ASSETS, "sample.jpg");
+  const strict = await optimizeAsset(source, resolveOptions({ cacheDir: CACHE, gate: STRICT_GATE }));
+  const loose = await optimizeAsset(source, resolveOptions({ cacheDir: CACHE, gate: { rmse: 30, p999: 200 } }));
+  expect(strict.path).not.toBe(loose.path);
+});
+
+// ------------------------------------------------------------- the gate
+
+/** Tighter than any lossy encoder can meet, so the refusal is the measurement. */
+const IMPOSSIBLE_GATE = { rmse: 0.01, p999: 1 };
+
+test("a quality the gate refuses does not ship, and the reason says why", async () => {
+  const result = await optimizeAsset(
+    join(ASSETS, "sample.png"),
+    resolveOptions({ cacheDir: CACHE, tryLossless: false, quality: 20, gate: IMPOSSIBLE_GATE }),
+  );
+  expect(result.path).toBe(join(ASSETS, "sample.png"));
+  expect(result.reason).toMatch(/webp q20 rmse \d+\.\d+, p99\.9 \d+/);
+});
+
+test("lossless is the floor under the gate, so there is always something to ship", async () => {
+  // Every lossy step is refused. Lossless carries no error, so it passes, and
+  // the asset still converts instead of falling back to its source.
+  const result = await optimizeAsset(
+    join(ASSETS, "sample.png"),
+    resolveOptions({ cacheDir: CACHE, quality: 20, gate: IMPOSSIBLE_GATE }),
+  );
+  expect(extname(result.path)).toBe(".webp");
+  expect(result.reason).toBe("webp lossless");
+});
+
+test("the same quality ships once the gate is turned off", async () => {
+  const options = { cacheDir: CACHE, tryLossless: false, quality: 20 };
+  const measured = await optimizeAsset(join(ASSETS, "sample.png"), resolveOptions({ ...options, gate: IMPOSSIBLE_GATE }));
+  const unmeasured = await optimizeAsset(join(ASSETS, "sample.png"), resolveOptions({ ...options, gate: false }));
+  expect(measured.path).toBe(join(ASSETS, "sample.png"));
+  expect(extname(unmeasured.path)).toBe(".webp");
+  expect(unmeasured.reason).toBe("webp q20");
+});
+
+test("an accepted candidate reports what it measured", async () => {
+  const result = await run("sample.jpg");
+  expect(result.extension).toBe(".webp");
+  expect(result.reason).toMatch(/webp (lossless|q\d+ \(rmse )/);
+});
+
+test("with no gate the best step of the ladder is used, not the smallest", async () => {
+  const options = { cacheDir: CACHE, tryLossless: false, gate: false as const };
+  const ladder = await optimizeAsset(join(ASSETS, "sample.jpg"), resolveOptions({ ...options, quality: [70, 90] }));
+  const best = await optimizeAsset(join(ASSETS, "sample.jpg"), resolveOptions({ ...options, quality: 90 }));
+  expect(ladder.reason).toBe("webp q90");
+  expect(ladder.outputSize).toBe(best.outputSize);
+});
+
+// ---------------------------------------------------------- the width cap
+
+/** A source wide enough to exercise the cap, written into the cache directory. */
+async function wide(name: string, width: number): Promise<string> {
+  const path = join(CACHE, name);
+  await mkdir(CACHE, { recursive: true });
+  const source = new Uint8Array(await Bun.file(join(ASSETS, "sample.png")).arrayBuffer());
+  await Bun.write(path, await new Bun.Image(source).resize(width).png().bytes());
+  return path;
+}
+
+test("an image wider than the cap is resampled, and the report says by how much", async () => {
+  const source = await wide("wide.png", 512);
+  const result = await optimizeAsset(source, resolveOptions({ cacheDir: CACHE, maxWidth: 128 }));
+  expect(result.reason).toContain("512×512 resampled to 128px wide");
+  const output = await new Bun.Image(new Uint8Array(await Bun.file(result.path).arrayBuffer())).metadata();
+  expect(output.width).toBe(128);
+});
+
+test("an image already inside the cap is left at its own size", async () => {
+  const source = await wide("narrow.png", 64);
+  const result = await optimizeAsset(source, resolveOptions({ cacheDir: CACHE, maxWidth: 128 }));
+  expect(result.reason).not.toContain("resampled");
+  const output = await new Bun.Image(new Uint8Array(await Bun.file(result.path).arrayBuffer())).metadata();
+  expect(output.width).toBe(64);
+});
+
+test("a large decode is reported even when no cap is set", async () => {
+  // Bytes on the wire are not the cost of an oversized image. Nothing else in
+  // the pipeline can see this, so the report is the only place it shows up.
+  const source = await wide("huge.png", 2100);
+  const result = await optimizeAsset(
+    source,
+    resolveOptions({ cacheDir: CACHE, tryLossless: false, gate: false, quality: 90 }),
+  );
+  expect(result.reason).toContain("2100×2100 decodes to");
+});
+
+test("a changed cap misses the cache", async () => {
+  const source = await wide("recapped.png", 512);
+  const small = await optimizeAsset(source, resolveOptions({ cacheDir: CACHE, maxWidth: 64 }));
+  const large = await optimizeAsset(source, resolveOptions({ cacheDir: CACHE, maxWidth: 256 }));
+  expect(small.outputSize).not.toBe(large.outputSize);
+});
+
+// ------------------------------------------------------- animation and video
+
+test("an animation ships only after every frame has been compared", async () => {
+  const result = await run("sample.apng");
+  expect(result.extension).toBe(".webp");
+  expect(result.reason).toMatch(/animated webp (lossless|q\d+) \(rmse /);
+  expect(await webpFrames(result.path)).toBe(10);
+});
+
+test("an animation is still measured when the encode is lossless", async () => {
+  const result = await run("sample.gif");
+  expect(result.reason).toContain("(rmse ");
+  expect(await webpFrames(result.path)).toBe(2);
+});
+
+test("an encoded video is decoded again before it is kept", async () => {
+  const result = await run("sample.mov");
+  expect(result.extension).toBe(".webm");
+  expect(result.reason).toMatch(/\d+ frames verified/);
+});
+
+test("an encoded audio file has its runtime verified", async () => {
+  const result = await run("sample.wav");
+  expect(result.extension).toBe(".webm");
+  expect(result.reason).toContain("runtime verified");
 });

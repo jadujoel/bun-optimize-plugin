@@ -71,27 +71,41 @@ There is no second output file and no alternative codec behind an option.
 3. **Alpha is preserved for images.** Animated WebP and still WebP carry alpha.
    VP9 alpha needs `-pix_fmt yuva420p`, which Safari does not play, so a video
    with alpha loses the alpha channel.
-4. **The smaller file wins.** If every candidate is larger than the source, the
+4. **The smallest file that still looks right wins.** Every lossy candidate is
+   decoded again and compared to the source pixel for pixel. Anything past the
+   gate is discarded, so which quality an asset ships at is measured rather than
+   assumed. See [The quality gate](#the-quality-gate).
+5. **An encode is proved before it is kept.** An animated WebP is replayed frame
+   by frame against the source. A video and an audio file are decoded again and
+   checked for lost frames and a changed runtime. An encoder that drops most of
+   its frames reports success and produces a much smaller file, so nothing but a
+   decode of the result catches it.
+6. **The smaller file wins.** If every candidate is larger than the source, the
    source is emitted unchanged. Set `force: true` to turn this rule off and get
    one format per media type instead.
-5. **An asset already in the target format is not re-encoded.** A `.webp` and a
+7. **An asset already in the target format is not re-encoded.** A `.webp` and a
    `.webm` source pass through. An Opus source is remuxed into WebM, not
    re-encoded. A VP9 video with Opus audio is remuxed too.
-6. **Results are cached by content hash.** The key is the source bytes plus the
-   encode options. A rebuild with an unchanged asset runs no encoder.
-7. **Metadata is stripped.** EXIF, GPS, and ICC profiles other than sRGB are
+8. **Results are cached by content hash.** The key is the source bytes plus the
+   encode options, the gate and the width cap included. A rebuild with an
+   unchanged asset runs no encoder.
+9. **Metadata is stripped.** EXIF, GPS, and ICC profiles other than sRGB are
    removed. The EXIF orientation is applied first.
 
 ## Options
 
 ```ts
 optimizePlugin({
-  /** WebP quality for still and animated images, 1 to 100. Default 80. */
-  quality: 80,
+  /** WebP qualities to try, smallest passing step wins. Default [92, 88, 82]. */
+  quality: [92, 88, 82],
+  /** How much error a lossy candidate may carry. Default { rmse: 4, p999: 44 }. */
+  gate: { rmse: 4, p999: 44 },
   /** Also encode a lossless WebP and keep the smaller file. Default true. */
   tryLossless: true,
-  /** VP9 constant quality, 0 to 63. Lower is better quality. Default 36. */
-  videoQuality: 36,
+  /** Resample any still image wider than this. Default off. */
+  maxWidth: undefined,
+  /** VP9 constant quality, 0 to 63. Lower is better quality. Default 32. */
+  videoQuality: 32,
   /** Opus bitrate. Default: 48k mono, 96k stereo, 128k above that. */
   audioBitrate: undefined,
   /** Emit the converted file even when it is larger. Default false. */
@@ -108,7 +122,97 @@ optimizePlugin({
 ```
 
 `tryLossless` wins on flat art, screenshots, and logos. It loses on photographs,
-and it doubles the image encode time. Set it to `false` for a photo library.
+and it doubles the image encode time. It is also the floor under the gate: a
+lossless candidate carries no error, so it always passes. With it off, an image
+whose every lossy candidate is refused keeps its source.
+
+## The quality gate
+
+A file size does not describe a picture. Picking the smallest candidate is not
+the same as picking the smallest candidate that still looks right, so every
+lossy encode is decoded again and measured against the source.
+
+The measurement is two numbers over alpha-premultiplied RGBA.
+
+- `rmse` — the average channel error, in 8-bit levels.
+- `p999` — the 99.9th-percentile channel error. This catches banding in one
+  small gradient that the average would hide.
+
+`quality` is a ladder, not a setting. Every step is encoded and measured, and
+the smallest one inside the gate wins. So the gate decides the quality and the
+ladder decides where the encoder may look. A stricter gate ships better pictures
+and more bytes.
+
+```ts
+import { optimizePlugin, STRICT_GATE } from "@jadujoel/bun-optimize-plugin";
+
+// Flat art, screenshots, and logos.
+optimizePlugin({ gate: STRICT_GATE });      // { rmse: 2, p999: 24 }
+
+// Photographs. This is the default.
+optimizePlugin({ gate: { rmse: 4, p999: 44 } });
+
+// Pick by file size alone, the way every other asset plugin does.
+optimizePlugin({ gate: false, quality: 80 });
+```
+
+The default is not the strict number, and the reason is worth knowing.
+Photographs do not behave like flat art: on a photographic collage every lossy
+WebP fails `STRICT_GATE` — q92 measures around rmse 3.5 and p99.9 40, and the
+error barely moves down to q65, because it is spread thinly across
+high-frequency texture rather than concentrated anywhere the eye lands. Refusing
+all of them means shipping lossless, which costs roughly 5× the bytes for a
+difference nobody can see at 1:1.
+
+The verbose log reports what was measured, and what was refused when nothing was
+accepted.
+
+```
+optimize  assets/photo.png    6.0 MB -> 497.0 kB (-92%)  webp q82 (rmse 2.81, p99.9 11)
+optimize  assets/logo.png     1.7 kB ->   84 B (-95%)  webp lossless
+optimize  assets/ink.png      1.7 kB ->  1.7 kB (0%)   kept source, already optimal; webp q82 rmse 5.39, p99.9 80
+```
+
+### Animation
+
+Animation gets the same gate, and it is the reason the gate exists at all.
+`libwebp_anim` merges frames. Some merges are invisible — two identical frames
+become one — and some are a different animation, such as 63 frames collapsing to
+4. Both produce a smaller file, so a pipeline that judges by size alone ships
+the second one and calls it a win.
+
+The candidate is therefore replayed frame by frame and compared to the source
+**by time, not by frame index**. Each source frame's midpoint is looked up in
+the candidate's timeline, and the two pictures at that instant are compared. A
+harmless merge passes. A merge that holds one picture for half a second does
+not. A lossless encode is measured too, because frame merging is a property of
+the encoder and not of the quality setting.
+
+## `maxWidth`
+
+Off by default, because resampling changes the picture. It is still worth
+setting.
+
+Bytes on the wire are not the cost of an oversized image. A 3911 × 4050
+background for a 920 px layout compresses to 329 kB, so no byte count ever
+complains about it, and it still costs 60 MB of resident bitmap and the decode
+time that goes with it — on the landing page, before anything else can paint.
+
+```ts
+optimizePlugin({ maxWidth: 1840 });  // 2× a 920 px layout
+```
+
+An image over the cap is resampled before a single candidate is encoded, and the
+gate then runs against the resampled image, so a shipped file is judged against
+the picture it is meant to be. An image over `LARGE_DECODE` is reported in the
+verbose log even when no cap is set.
+
+```
+optimize  assets/sky.png    6.0 MB -> 508.8 kB (-92%)  webp q82 (rmse 2.81, p99.9 11); 3000×2000 resampled to 1840px wide
+optimize  assets/sky.png    6.0 MB -> 372.8 kB (-94%)  webp lossless; 3000×2000 decodes to 22.9 MB
+```
+
+Animations are never resampled.
 
 ### `force`
 
@@ -122,8 +226,8 @@ optimizePlugin({ force: true });
 ```
 
 ```
-optimize  assets/sample.avif    401 B ->  654 B (+63%)  webp q80, forced
-optimize  assets/sample.ogg    9.3 kB -> 9.9 kB (+7%)   remux opus to webm, forced
+optimize  assets/sample.avif    401 B ->  654 B (+63%)  webp lossless, forced
+optimize  assets/sample.ogg    9.3 kB -> 9.9 kB (+7%)   remux opus to webm, forced; runtime verified
 optimize  assets/sample.png    1.7 kB ->   84 B (-95%)  webp lossless
 optimize  16 assets  274.4 kB -> 93.3 kB (-66%)
 ```
@@ -149,9 +253,10 @@ The example builds `example/index.html`, which references every format in
 `example/assets`.
 
 ```
-optimize  assets/sample.wav   86.2 kB -> 7.8 kB (-91%)  opus 48k
+optimize  assets/sample.wav   86.2 kB -> 7.8 kB (-91%)  opus 48k; runtime verified
 optimize  assets/sample.png    1.7 kB ->  84 B (-95%)  webp lossless
-optimize  assets/sample.mov   17.4 kB -> 14.0 kB (-19%)  vp9 crf36
+optimize  assets/sample.mov   17.4 kB -> 14.9 kB (-14%)  vp9 crf32; 15 frames verified
+optimize  assets/sample.gif     397 B ->  140 B (-65%)  animated webp lossless (rmse 0.00, p99.9 0)
 optimize  assets/sample.avif    401 B ->  401 B (-0%)  kept source, it is smaller
 optimize  16 assets  274.4 kB -> 91.8 kB (-67%)
 ```
@@ -168,6 +273,14 @@ optimize  16 assets  274.4 kB -> 91.8 kB (-67%)
   even under `force: true`.
 - A failed encode is not an error. The plugin prints a warning and copies the
   source.
+- The gate measures a picture against its own source. It cannot tell you that
+  the source is the wrong size for the box it is drawn in, or that an asset is
+  loaded on a page that never shows it. Those are the two largest wins on a real
+  site, and they are decisions only the page can make.
+- The frame check on video is deliberately loose. A variable-frame-rate source
+  encoded at a constant rate legitimately changes its frame count, so demanding
+  equality would refuse correct encodes. The check catches catastrophic loss;
+  the runtime check catches re-timing.
 
 ## Test
 

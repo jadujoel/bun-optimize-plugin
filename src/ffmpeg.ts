@@ -11,6 +11,7 @@
 import { architecture, binaries, isSupportedArchitecture, isSupportedPlatform, platf } from "ffmpeg-helper";
 import { dirname, join } from "node:path";
 
+
 if (!isSupportedPlatform(platf) || !isSupportedArchitecture(architecture)) {
   throw new Error(`bun-optimize-plugin: ffmpeg has no binary for ${platf}-${architecture}.`);
 }
@@ -46,9 +47,12 @@ export interface AudioStream {
 export interface Probe {
   video?: { codec: string };
   audio?: AudioStream;
+  /** Runtime in seconds, or undefined when the container does not say. */
+  duration?: number;
 }
 
 const STREAM_LINE = /Stream #\d+:\d+[^:]*: (Audio|Video): ([A-Za-z0-9_]+)/;
+const DURATION_LINE = /Duration:\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)/;
 
 function channelsOf(line: string): number {
   if (/\bmono\b/.test(line)) return 1;
@@ -57,15 +61,46 @@ function channelsOf(line: string): number {
   return match ? Number(match[1]) : 2;
 }
 
+/** Seconds from an ffmpeg `Duration:` line. `Duration: N/A` gives undefined. */
+export function reportDuration(report: string): number | undefined {
+  const match = report.match(DURATION_LINE);
+  if (!match) return undefined;
+  return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+}
+
 /**
- * Read the first audio and video stream of a file.
+ * How many frames ffmpeg decoded, from the last progress line of its report.
+ *
+ * This is the number the encode gate turns on. An encoder that writes 4 of 63
+ * frames reports success and produces a much smaller file, so nothing but a
+ * decode of the result catches it.
+ */
+export function framesDecoded(report: string): number {
+  const matches = [...report.matchAll(/frame=\s*(\d+)/g)];
+  return matches.length ? Number(matches.at(-1)![1]) : 0;
+}
+
+/**
+ * Decode `file` to nothing and count the frames.
+ *
+ * `decoder` matters for WebM alpha: only `libvpx-vp9` reads the alpha side
+ * data, and the native `vp9` decoder presents even a good file as opaque.
+ */
+export async function countFrames(file: string, decoder?: string): Promise<number> {
+  const flags = decoder ? ["-c:v", decoder] : [];
+  const { stderr } = await ffmpeg([...flags, "-i", file, "-f", "null", "-"]);
+  return framesDecoded(stderr);
+}
+
+/**
+ * Read the first audio and video stream of a file, and its runtime.
  *
  * ffmpeg exits with a non-zero code because no output file is given, so the
  * exit code is ignored and only stderr is parsed.
  */
 export async function probe(file: string): Promise<Probe> {
   const { stderr } = await ffmpeg(["-i", file]);
-  const result: Probe = {};
+  const result: Probe = { duration: reportDuration(stderr) };
   for (const line of stderr.split("\n")) {
     const match = line.match(STREAM_LINE);
     if (!match) continue;
@@ -74,4 +109,45 @@ export async function probe(file: string): Promise<Probe> {
     if (type === "Audio" && !result.audio) result.audio = { codec, channels: channelsOf(line) };
   }
   return result;
+}
+
+export interface DecodedFrames {
+  /** One full-canvas PNG per frame, in order. */
+  files: string[];
+  /** How long each frame stays on screen, in milliseconds. */
+  durations: number[];
+}
+
+/**
+ * Decode an animation to one full-canvas PNG per frame.
+ *
+ * ffmpeg applies the dispose and blend rules before the frames reach disk, so
+ * each file is what is on screen at that moment. `-vsync 0` keeps every source
+ * frame instead of resampling to a fixed rate, which for a variable-delay GIF
+ * or APNG would silently drop or duplicate frames.
+ *
+ * The timeline comes from `showinfo`, not from the container. That is
+ * deliberate: it is the timeline the encoder was handed, so a gate built on it
+ * compares two views of the same decode rather than a decode against a parse.
+ * ffmpeg 5.0.1 prints no per-frame duration, so each frame lasts until the next
+ * one starts, and the last frame borrows the runtime or the previous gap.
+ */
+export async function decodeFrames(file: string, into: string): Promise<DecodedFrames> {
+  const { stderr } = await ffmpeg(["-i", file, "-vsync", "0", "-vf", "showinfo", join(into, "%05d.png")]);
+  const times = [...stderr.matchAll(/pts_time:([0-9.]+)/g)].map(match => Number(match[1]) * 1000);
+  const files = [...new Bun.Glob("*.png").scanSync(into)].sort().map(name => join(into, name));
+
+  const durations: number[] = [];
+  for (let index = 0; index < times.length - 1; index++) {
+    durations.push(times[index + 1]! - times[index]!);
+  }
+  if (times.length) {
+    const total = reportDuration(stderr);
+    const last = times.at(-1)!;
+    // A runtime the container reports is exact. Without one, the last frame is
+    // assumed to be as long as the one before it, which is right for every
+    // constant-rate animation and close enough for the rest.
+    durations.push(total !== undefined && total * 1000 > last ? total * 1000 - last : (durations.at(-1) ?? 100));
+  }
+  return { files, durations };
 }

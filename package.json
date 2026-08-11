@@ -18,7 +18,8 @@
     "index.ts",
     "src",
     "intent.md",
-    "README.md"
+    "README.md",
+    "example"
   ],
   "scripts": {
     "example": "(cd example && rm -rf dist && bun build.ts && bunx serve dist)",
