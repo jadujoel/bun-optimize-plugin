@@ -75,6 +75,7 @@ export function optimizePlugin(options: OptimizeOptions = {}): BunPlugin {
         if (!args.path.startsWith(".") && !isAbsolute(args.path)) return undefined;
 
         const source = isAbsolute(args.path) ? args.path : resolve(args.resolveDir, args.path);
+        if (resolved.exclude?.test(source)) return undefined;
         if (!(await Bun.file(source).exists())) return undefined;
 
         let pending = inFlight.get(source);

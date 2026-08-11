@@ -2,16 +2,18 @@
 
 ## Output formats
 
-| Input                          | Default output           | Codec / encoder                | Tool               |
-| ------------------------------ | ------------------------ | ------------------------------ | ------------------ |
-| Audio (`.wav .mp3 .m4a .ogg .caf .opus`) | `.webm`        | Opus (`libopus`)               | ffmpeg             |
-| Video (`.mov .mp4 .webm .mkv`) | `.webm`                  | VP9 (`libvpx-vp9`) + Opus      | ffmpeg             |
-| Animated image (`.gif`, animated `.apng` / `.webp`) | `.webp` | animated WebP (`libwebp_anim`) | ffmpeg             |
-| Still image (`.png .jpg .jpeg .webp .avif .heic .bmp .tiff`) | `.webp` | WebP                    | `Bun.Image`        |
-| Anything else                  | copied unchanged         | —                              | —                  |
+| Input           | Default output   | Codec / encoder                | Tool                  |
+| --------------- | ---------------- | ------------------------------ | --------------------- |
+| Audio           | `.webm`          | Opus (`libopus`)               | ffmpeg                |
+| Video           | `.webm`          | VP9 (`libvpx-vp9`) + Opus      | ffmpeg                |
+| Animated image  | `.webp`          | animated WebP (`libwebp_anim`) | ffmpeg                |
+| Still image     | `.webp`          | WebP                           | `Bun.Image` or ffmpeg |
+| Anything else   | copied unchanged | —                              | —                     |
 
 Two output formats, `.webp` and `.webm`. There is no second output file for any
 input, and no alternative codec behind an option. An asset produces one file.
+
+The row is chosen by the bytes. See rule 12.
 
 ## Rules
 
@@ -40,14 +42,39 @@ input, and no alternative codec behind an option. An asset produces one file.
    emit the source.
 8. Never re-encode an asset that is already in the target format at or below
    the target quality. Re-encoding a `.webp` or a `.webm` loses quality and
-   gains nothing.
+   gains nothing. A track, not a file, is the unit: VP9 video beside AAC audio
+   copies the picture and encodes only the sound. A file is left alone entirely
+   only when its name, its container, and both its codecs are already what the
+   plugin would emit, so an MKV holding VP9 and Opus is still remuxed — the
+   bytes are right and no `<video>` tag accepts the name.
 9. Cache by content hash of the source plus everything that changes the output
    bytes, the gate and the width cap included. ffmpeg runs cost seconds, and a
    bundler plugin runs on every build.
 10. Strip metadata. EXIF, GPS, and ICC profiles other than sRGB are removed.
     Apply the EXIF orientation first (`Bun.Image` does this by default).
 11. Use the bundled `ffmpeg-helper` binary, not a system `ffmpeg`.
-12. Resolution is a decision made once, before any candidate is encoded.
+12. The bytes choose the encoder, never the extension. The extension only
+    decides whether the file is opened at all. A `.jpg` holding a PNG, an
+    `.mp4` holding one still picture, a `.png` holding a film, and a `.ogg`
+    holding a film are all things people ship, and the last of those is why
+    this rule is not merely tidy: an audio encode strips video without a word.
+    A picture the byte sniffer names is routed on the sniff. Everything else is
+    handed to ffmpeg, and its answer decides: a still-image demuxer means a
+    still picture, a video stream that is not cover art means footage, and
+    sound with no footage means audio. Album art is a video stream by every
+    other measure, and an MP3 that carries it must not become a one-frame film.
+13. Decode with whatever will decode it. `Bun.Image` reads JPEG, PNG, WebP,
+    GIF, BMP, and — through the OS codec — TIFF, HEIC, and AVIF. It refuses
+    everything else three different ways, and all three fall back to ffmpeg,
+    because shipping a source untouched over a refusal that another decoder
+    does not share is a worse answer than a second attempt.
+14. Convert pictures, not data that resembles a picture. `.exr`, `.hdr`,
+    `.dds`, `.ktx`, and `.basis` hold dynamic range or GPU texture layout that
+    a WebP cannot carry, and whatever reads them is not an `<img>` tag. `.ico`
+    holds several resolutions where a WebP holds one. These are copied. So is
+    anything the `exclude` option names, which is the escape hatch for a `.tga`
+    that is really a texture.
+15. Resolution is a decision made once, before any candidate is encoded.
     `maxWidth` resamples the source and the gate then runs against the
     resampled image, so a shipped file is judged against the picture it is
     meant to be. Bytes on the wire are not the cost of an oversized image: a
@@ -62,9 +89,17 @@ input, and no alternative codec behind an option. An asset produces one file.
 - `Bun.Image` cannot decode TIFF, HEIC, or AVIF on Linux. TIFF falls back to
   ffmpeg. The bundled ffmpeg 5.0.1 does not read a still HEIC or AVIF, so those
   two are copied unchanged on Linux.
+- JPEG XL and QOI have no decoder here at all, in `Bun.Image` or in ffmpeg
+  5.0.1, so their extensions are not claimed. They would only ever be copied,
+  and claiming them would spend a process per build to learn that again.
+- A file is read into memory whole to be hashed for the cache key. A 500 MB
+  video costs 500 MB of resident buffer for a hash that a stream would give for
+  nothing. Nothing else about a large video is loaded, so this is the one place
+  the size shows up.
 - `maxWidth` is one number for every asset. A backdrop and a figure drawn at a
   third of its width want different caps, and `srcset` generation would want
-  several outputs per source, which rule 3's one-file-per-asset forbids today.
+  several outputs per source, which the one-file-per-asset rule at the top of
+  this document forbids today.
 - The gate is one number for every asset. Flat art wants `STRICT_GATE` and
   photographs want the default, and nothing here measures which is which.
 - PNG is never a candidate. Indexed PNG still beats WebP on flat artwork with

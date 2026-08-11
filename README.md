@@ -48,16 +48,43 @@ import { OptimizePlugin } from "@jadujoel/bun-optimize-plugin";
 
 ## Formats
 
-| Input                                                        | Output           | Encoder                        |
-| ------------------------------------------------------------ | ---------------- | ------------------------------ |
-| Audio (`.wav .mp3 .m4a .ogg .caf .opus`)                       | `.webm`          | Opus, `libopus`                |
-| Video (`.mov .mp4 .webm .mkv`)                                 | `.webm`          | VP9 and Opus, `libvpx-vp9`     |
-| Animated image (`.gif`, animated `.apng` or `.webp`)           | `.webp`          | animated WebP, `libwebp_anim`  |
-| Still image (`.png .jpg .jpeg .webp .avif .heic .bmp .tiff`)   | `.webp`          | WebP, `Bun.Image`              |
-| Anything else                                                  | copied unchanged | —                              |
+| Input            | Output           | Encoder                       |
+| ---------------- | ---------------- | ----------------------------- |
+| Audio            | `.webm`          | Opus, `libopus`               |
+| Video            | `.webm`          | VP9 and Opus, `libvpx-vp9`    |
+| Animated image   | `.webp`          | animated WebP, `libwebp_anim` |
+| Still image      | `.webp`          | WebP, `Bun.Image` or ffmpeg   |
+| Anything else    | copied unchanged | —                             |
 
 There are two output formats, `.webp` and `.webm`. One asset produces one file.
 There is no second output file and no alternative codec behind an option.
+
+**Which row an asset lands in is decided by its bytes, not by its name.** A
+`.jpg` holding a PNG, an `.mp4` holding one still picture, and a `.ogg` holding
+a film all reach the right encoder. The extension only decides whether the
+plugin opens the file at all:
+
+- **Audio:** `.wav .wave .w64 .mp3 .mp2 .m4a .m4b .aac .ogg .oga .opus .flac
+  .alac .aiff .aif .aifc .caf .wma .weba .mka .au .snd .amr .voc .ape`
+- **Video:** `.mov .qt .mp4 .m4v .webm .mkv .mk3d .avi .wmv .asf .flv .f4v .3gp
+  .3g2 .mpg .mpeg .mpe .m1v .m2v .ogv .m2ts .mts .vob .dv`
+- **Image:** `.png .apng .jpg .jpeg .jpe .jfif .pjpeg .pjp .webp .gif .avif
+  .avifs .heic .heif .heics .bmp .dib .tif .tiff .tga .pcx .ppm .pgm .pbm .pnm
+  .pam .sgi .jp2 .j2k .jpf .jpx .psd .xbm .xpm .dpx`
+
+`Bun.Image` reads JPEG, PNG, WebP, GIF, BMP, and — through the OS codec, so on
+macOS and Windows only — TIFF, HEIC, and AVIF. Everything else in the image list
+is decoded by the bundled ffmpeg, and so is any file `Bun.Image` refuses.
+
+Some things are deliberately left alone. `.exr`, `.hdr`, `.dds`, `.ktx`, and
+`.basis` hold dynamic range or GPU texture layout that a WebP cannot carry, and
+whatever reads them is not an `<img>` tag. `.ico` holds several resolutions
+where a WebP holds one. `.svg` needs a minifier this plugin does not have.
+`.ts` is TypeScript far more often than it is an MPEG transport stream. Use
+`exclude` to leave anything else alone as well.
+
+A source the plugin cannot decode at all is emitted unchanged, and `verbose`
+says why. A build never fails because of an asset.
 
 ## Rules
 
@@ -83,9 +110,12 @@ There is no second output file and no alternative codec behind an option.
 6. **The smaller file wins.** If every candidate is larger than the source, the
    source is emitted unchanged. Set `force: true` to turn this rule off and get
    one format per media type instead.
-7. **An asset already in the target format is not re-encoded.** A `.webp` and a
-   `.webm` source pass through. An Opus source is remuxed into WebM, not
-   re-encoded. A VP9 video with Opus audio is remuxed too.
+7. **An asset already in the target format is not re-encoded.** A `.webp` source
+   passes through, and so does a `.webm` that really holds WebM codecs. An Opus
+   track is copied into the WebM rather than encoded again, and so is a VP8,
+   VP9, or AV1 picture. The two tracks are decided one at a time, so VP9 video
+   beside AAC audio keeps its picture and re-encodes only the sound. Album art
+   is not a picture track and never routes a song to the video encoder.
 8. **Results are cached by content hash.** The key is the source bytes plus the
    encode options, the gate and the width cap included. A rebuild with an
    unchanged asset runs no encoder.
@@ -110,6 +140,8 @@ optimizePlugin({
   audioBitrate: undefined,
   /** Emit the converted file even when it is larger. Default false. */
   force: false,
+  /** Leave any source whose path matches this alone. Default off. */
+  exclude: undefined,
   /** Cache directory. Default node_modules/.cache/bun-optimize-plugin. */
   cacheDir: undefined,
   /** Read the cache but never write it. Default false. */

@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { DEFAULT_GATE, type Gate } from "./quality.ts";
 
 export interface OptimizeOptions {
@@ -77,6 +77,21 @@ export interface OptimizeOptions {
    */
   force?: boolean;
   /**
+   * Leave any source whose absolute path matches this alone. The bundler copies
+   * it the way it copies a `.txt` file.
+   *
+   * The plugin claims every audio, video, and image extension it can decode,
+   * including formats a browser cannot display. A `.tga` or a `.psd` is
+   * normally an image that should ship as a WebP, but it can also be a texture
+   * that some loader in the page reads byte by byte, and that loader breaks
+   * when the bytes change. This is how to say so.
+   *
+   * ```ts
+   * optimizePlugin({ exclude: /\/textures\// })
+   * ```
+   */
+  exclude?: RegExp;
+  /**
    * Directory for the content-hash cache.
    * @default "node_modules/.cache/bun-optimize-plugin"
    */
@@ -107,6 +122,7 @@ export interface ResolvedOptions {
   videoQuality: number;
   audioBitrate?: string;
   force: boolean;
+  exclude: RegExp | null;
   cacheDir: string;
   disableCache: boolean;
   verbose: boolean;
@@ -134,7 +150,11 @@ export function resolveOptions(options: OptimizeOptions = {}): ResolvedOptions {
     videoQuality: options.videoQuality ?? 32,
     audioBitrate: options.audioBitrate,
     force: options.force ?? false,
-    cacheDir: options.cacheDir ?? join(process.cwd(), "node_modules", ".cache", "bun-optimize-plugin"),
+    exclude: options.exclude ?? null,
+    // Resolved, because the plugin hands this path back to the bundler and Bun
+    // refuses a relative path from `onResolve`. A relative `cacheDir` would
+    // fail the build with a message about the plugin rather than about itself.
+    cacheDir: resolve(options.cacheDir ?? join("node_modules", ".cache", "bun-optimize-plugin")),
     disableCache: options.disableCache ?? false,
     verbose: options.verbose ?? false,
     concurrency: options.concurrency ?? navigator.hardwareConcurrency ?? 4,

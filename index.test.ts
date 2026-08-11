@@ -41,6 +41,19 @@ test("a file the plugin does not handle is copied unchanged", () => {
   expect(emitted.some(name => name.endsWith(".tgz"))).toBe(true);
 });
 
+test("an excluded source is copied unchanged", async () => {
+  const out = await mkdtemp(join(tmpdir(), "optimize-plugin-excluded-"));
+  const build = await Bun.build({
+    entrypoints: [join(import.meta.dir, "example", "index.html")],
+    plugins: [optimizePlugin({ cacheDir, exclude: /sample\.png$/ })],
+    outdir: out,
+  });
+  const page = await Bun.file(join(out, "index.html")).text();
+  expect(build.success).toBe(true);
+  expect(page).toMatch(/<img [^>]*src="\.\/sample-\w+\.png"/);
+  await rm(out, { recursive: true, force: true });
+});
+
 test("the optimized bundle is smaller than the sources", async () => {
   const glob = new Bun.Glob("sample.*");
   let sources = 0;

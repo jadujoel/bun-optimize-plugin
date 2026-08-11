@@ -10,24 +10,48 @@
 /** The container formats this plugin routes on. */
 export type ImageFormat = "gif" | "png" | "jpeg" | "webp" | "avif" | "heic" | "bmp" | "tiff" | "unknown";
 
-/** Extensions the intent table treats as audio. */
-export const AUDIO_EXTENSIONS = new Set([".wav", ".mp3", ".m4a", ".ogg", ".caf", ".opus"]);
+/**
+ * The three tables below decide which files the plugin opens. They do not
+ * decide what happens next: the bytes do that. A `.mp4` holding a still JPEG
+ * becomes a WebP, and a `.png` holding a film becomes a WebM. So an extension
+ * in the wrong table costs nothing, and an extension in no table is copied.
+ *
+ * `.ts` is deliberately absent. It names an MPEG transport stream and it names
+ * TypeScript, and claiming it would put this plugin in front of every source
+ * file in the build.
+ */
 
-/** Extensions the intent table treats as video. */
-export const VIDEO_EXTENSIONS = new Set([".mov", ".mp4", ".webm", ".mkv"]);
+/** Extensions the plugin opens and expects to hold sound. */
+// prettier-ignore
+export const AUDIO_EXTENSIONS = new Set([
+  ".wav", ".wave", ".w64", ".mp3", ".mp2", ".m4a", ".m4b", ".aac", ".ogg", ".oga",
+  ".opus", ".flac", ".alac", ".aiff", ".aif", ".aifc", ".caf", ".wma", ".weba",
+  ".mka", ".au", ".snd", ".amr", ".voc", ".ape",
+]);
 
-/** Extensions the intent table treats as an image, still or animated. */
+/** Extensions the plugin opens and expects to hold moving pictures. */
+// prettier-ignore
+export const VIDEO_EXTENSIONS = new Set([
+  ".mov", ".qt", ".mp4", ".m4v", ".webm", ".mkv", ".mk3d", ".avi", ".wmv", ".asf",
+  ".flv", ".f4v", ".3gp", ".3g2", ".mpg", ".mpeg", ".mpe", ".m1v", ".m2v", ".ogv",
+  ".m2ts", ".mts", ".vob", ".dv",
+]);
+
+/**
+ * Extensions the plugin opens and expects to hold a picture.
+ *
+ * A picture meant for a screen is here. Data that only looks like a picture is
+ * not: `.exr`, `.hdr`, `.dds`, `.ktx`, and `.basis` carry high dynamic range or
+ * GPU texture layout that a WebP cannot hold, and whatever reads them is not an
+ * `<img>` tag. `.svg` needs a minifier this plugin does not have, and `.ico`
+ * carries several resolutions in one file where a WebP carries one.
+ */
+// prettier-ignore
 export const IMAGE_EXTENSIONS = new Set([
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".webp",
-  ".avif",
-  ".heic",
-  ".bmp",
-  ".tiff",
-  ".gif",
-  ".apng",
+  ".png", ".apng", ".jpg", ".jpeg", ".jpe", ".jfif", ".pjpeg", ".pjp", ".webp",
+  ".gif", ".avif", ".avifs", ".heic", ".heif", ".heics", ".bmp", ".dib", ".tif",
+  ".tiff", ".tga", ".pcx", ".ppm", ".pgm", ".pbm", ".pnm", ".pam", ".sgi", ".jp2",
+  ".j2k", ".jpf", ".jpx", ".psd", ".xbm", ".xpm", ".dpx",
 ]);
 
 function ascii(bytes: Uint8Array, offset: number, length: number): string {

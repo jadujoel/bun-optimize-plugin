@@ -1,7 +1,7 @@
 /**
  * The bundled ffmpeg binary.
  *
- * Rule 8 of intent.md: use the `ffmpeg-helper` binary, not a system `ffmpeg`.
+ * Rule 11 of intent.md: use the `ffmpeg-helper` binary, not a system `ffmpeg`.
  * The `path` export of `ffmpeg-helper` is resolved against the current working
  * directory, so it is wrong whenever the build runs from a subdirectory. Only
  * the binary table is imported here, and the package directory is resolved
@@ -45,14 +45,34 @@ export interface AudioStream {
 }
 
 export interface Probe {
+  /** The demuxer ffmpeg chose, for example `matroska,webm` or `png_pipe`. */
+  container?: string;
+  /** The first video stream that is footage. Cover art is not footage. */
   video?: { codec: string };
   audio?: AudioStream;
+  /** True when the file carries a still picture as an attachment. */
+  coverArt?: boolean;
   /** Runtime in seconds, or undefined when the container does not say. */
   duration?: number;
 }
 
+const INPUT_LINE = /^Input #\d+, (.+?), from /m;
 const STREAM_LINE = /Stream #\d+:\d+[^:]*: (Audio|Video): ([A-Za-z0-9_]+)/;
 const DURATION_LINE = /Duration:\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)/;
+
+/**
+ * Demuxers that only ever read one picture.
+ *
+ * ffmpeg presents a still image as a video stream, so nothing in a stream list
+ * separates a TGA from a one-second clip. The demuxer does: every still format
+ * arrives through a `_pipe` demuxer, through `image2`, or through `ico`. This
+ * is what stops a renamed video from shipping as a single WebP frame, and what
+ * stops a TGA from shipping as a WebM.
+ */
+export function isStillContainer(container: string | undefined): boolean {
+  if (!container) return false;
+  return container.endsWith("_pipe") || container === "image2" || container === "ico";
+}
 
 function channelsOf(line: string): number {
   if (/\bmono\b/.test(line)) return 1;
@@ -93,19 +113,24 @@ export async function countFrames(file: string, decoder?: string): Promise<numbe
 }
 
 /**
- * Read the first audio and video stream of a file, and its runtime.
+ * Read the container, the first audio and video stream, and the runtime.
  *
  * ffmpeg exits with a non-zero code because no output file is given, so the
  * exit code is ignored and only stderr is parsed.
+ *
+ * A video stream marked `(attached pic)` is cover art, not footage. An MP3 or
+ * an M4A with album art carries one, and routing it as video would encode the
+ * artwork as a one-frame film and throw the music away.
  */
 export async function probe(file: string): Promise<Probe> {
   const { stderr } = await ffmpeg(["-i", file]);
-  const result: Probe = { duration: reportDuration(stderr) };
+  const result: Probe = { container: stderr.match(INPUT_LINE)?.[1], duration: reportDuration(stderr) };
   for (const line of stderr.split("\n")) {
     const match = line.match(STREAM_LINE);
     if (!match) continue;
     const [, type, codec] = match as unknown as [string, "Audio" | "Video", string];
-    if (type === "Video" && !result.video) result.video = { codec };
+    if (type === "Video" && line.includes("(attached pic)")) result.coverArt = true;
+    else if (type === "Video" && !result.video) result.video = { codec };
     if (type === "Audio" && !result.audio) result.audio = { codec, channels: channelsOf(line) };
   }
   return result;
