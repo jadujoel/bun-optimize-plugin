@@ -1,6 +1,6 @@
 {
   "name": "@jadujoel/bun-optimize-plugin",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "A Bun build plugin that re-encodes images to WebP and audio and video to WebM.",
   "author": "Joel Lof <joel.lof@icloud.com> (https://joellof.com/)",
   "license": "MIT",
@@ -11,9 +11,9 @@
     ".": "./index.ts"
   },
   "repository": {
-		"type": "git",
-		"url": "https://github.com/jadujoel/bun-optimize-plugin"
-	},
+    "type": "git",
+    "url": "https://github.com/jadujoel/bun-optimize-plugin"
+  },
   "private": false,
   "publishConfig": {
     "access": "public"
