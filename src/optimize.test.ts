@@ -1,6 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
-import { rm } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { extname, join } from "node:path";
+import { ffmpeg } from "./ffmpeg.ts";
 import { resolveOptions } from "./options.ts";
 import { optimizeAsset } from "./optimize.ts";
 
@@ -98,15 +99,52 @@ test("the second call reads the cache", async () => {
 
 const forced = resolveOptions({ cacheDir: CACHE, force: true });
 
+/**
+ * True when this machine decodes AVIF. `Bun.Image` reads AVIF, HEIC, and TIFF
+ * through the OS codec, which Linux does not have, and the bundled ffmpeg 5.0.1
+ * does not demux a still AVIF either.
+ */
+const decodesAvif = await new Bun.Image(new Uint8Array(await Bun.file(join(ASSETS, "sample.avif")).arrayBuffer()))
+  .webp({ quality: 80 })
+  .bytes()
+  .then(
+    () => true,
+    () => false,
+  );
+
 test("force converts an avif that the source would otherwise win", async () => {
   const source = join(ASSETS, "sample.avif");
   const kept = await optimizeAsset(source, options);
   expect(kept.path).toBe(source);
 
   const result = await optimizeAsset(source, forced);
+  if (!decodesAvif) {
+    // No AVIF decoder here, so force has nothing to convert and keeps the source.
+    expect(result.path).toBe(source);
+    expect(result.reason).toContain("encode failed");
+    return;
+  }
   expect(extname(result.path)).toBe(".webp");
   expect(result.outputSize).toBeGreaterThan(result.sourceSize);
   expect(result.reason).toContain("forced");
+});
+
+test("a format Bun.Image refuses falls back to ffmpeg", async () => {
+  const source = join(CACHE, "fallback.tiff");
+  await mkdir(CACHE, { recursive: true });
+  await ffmpeg(["-y", "-i", join(ASSETS, "sample.png"), source]);
+
+  // The "bun" backend drops the OS codec, so every machine refuses this TIFF
+  // the way Linux does. ffmpeg decodes it, so the encode still produces a WebP.
+  const backend = Bun.Image.backend;
+  Bun.Image.backend = "bun";
+  try {
+    const result = await optimizeAsset(source, resolveOptions({ cacheDir: CACHE, force: true }));
+    expect(extname(result.path)).toBe(".webp");
+    expect(result.reason).toContain("via ffmpeg");
+  } finally {
+    Bun.Image.backend = backend;
+  }
 });
 
 test("force converts an ogg to webm even though webm is larger", async () => {

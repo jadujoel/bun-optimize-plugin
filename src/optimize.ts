@@ -74,18 +74,72 @@ async function writeTemp(
 }
 
 /**
+ * True when `Bun.Image` refused the format on this machine.
+ *
+ * AVIF, HEIC, and TIFF decode through the OS codec, so they work on macOS and
+ * on Windows and fail on Linux. The fallback encoder runs on that rejection.
+ */
+function isUnsupportedFormat(error: unknown): boolean {
+  return (error as { code?: string } | null)?.code === "ERR_IMAGE_FORMAT_UNSUPPORTED";
+}
+
+/**
+ * Encode a still image to WebP with ffmpeg, for a format `Bun.Image` refuses.
+ *
+ * This covers TIFF on Linux. The bundled ffmpeg is 5.0.1, and its MOV demuxer
+ * does not read a still AVIF or HEIC, so those two throw here and the caller
+ * keeps the source.
+ */
+async function encodeStillImageWithFfmpeg(
+  source: string,
+  directory: string,
+  options: ResolvedOptions,
+): Promise<Candidate[]> {
+  const common = ["-y", "-i", source, "-map_metadata", "-1", "-frames:v", "1", "-c:v", "libwebp"];
+  const candidates: Candidate[] = [];
+  const lossy = await encodeToTemp(
+    directory,
+    ".webp",
+    output => [...common, "-lossless", "0", "-q:v", String(options.quality), "-pix_fmt", "yuva420p", "-f", "webp", output],
+    `webp q${options.quality} via ffmpeg`,
+  );
+  if (lossy) candidates.push(lossy);
+  if (options.tryLossless) {
+    const lossless = await encodeToTemp(
+      directory,
+      ".webp",
+      output => [...common, "-lossless", "1", "-pix_fmt", "bgra", "-f", "webp", output],
+      "webp lossless via ffmpeg",
+    );
+    if (lossless) candidates.push(lossless);
+  }
+  return candidates;
+}
+
+/**
  * Encode a still image to WebP with `Bun.Image`.
  *
  * `Bun.Image` decodes from the bytes, so EXIF, GPS, and non-sRGB ICC profiles
  * never reach the output. `autoOrient` applies the EXIF orientation first.
+ *
+ * A format the OS codec owns falls back to ffmpeg. The first encode proves the
+ * decoder, so the lossless encode after it never hits that fallback.
  */
 async function encodeStillImage(
+  source: string,
   bytes: Uint8Array,
   directory: string,
   options: ResolvedOptions,
 ): Promise<Candidate[]> {
+  let lossy: Uint8Array;
+  try {
+    lossy = await new Bun.Image(bytes, { autoOrient: true }).webp({ quality: options.quality }).bytes();
+  } catch (error) {
+    if (!isUnsupportedFormat(error)) throw error;
+    return encodeStillImageWithFfmpeg(source, directory, options);
+  }
+
   const candidates: Candidate[] = [];
-  const lossy = await new Bun.Image(bytes, { autoOrient: true }).webp({ quality: options.quality }).bytes();
   candidates.push(await writeTemp(directory, ".webp", lossy, `webp q${options.quality}`));
   if (options.tryLossless) {
     const lossless = await new Bun.Image(bytes, { autoOrient: true }).webp({ lossless: true }).bytes();
@@ -223,7 +277,7 @@ async function encodeCandidates(
     // Rule 5: WebP is already the target format.
     if (format === "webp") return [];
     if (isAnimated(bytes, format)) return encodeAnimatedImage(source, directory, options);
-    return encodeStillImage(bytes, directory, options);
+    return encodeStillImage(source, bytes, directory, options);
   }
 
   if (VIDEO_EXTENSIONS.has(ext)) {

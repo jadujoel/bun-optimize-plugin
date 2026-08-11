@@ -161,8 +161,11 @@ optimize  16 assets  274.4 kB -> 91.8 kB (-67%)
 - iOS Safari older than 17.4 does not play WebM. Audio and video break on those
   versions. The single-format rule accepts this.
 - SVG is copied unchanged. Minification needs a dependency, and none is chosen.
-- `Bun.Image` cannot decode TIFF on Linux, and cannot decode HEIC or AVIF there.
-  Such a file is copied unchanged.
+- `Bun.Image` cannot decode TIFF, HEIC, or AVIF on Linux. Those three formats
+  need the OS codec, which macOS and Windows have. A refused format falls back
+  to ffmpeg, which decodes TIFF. The bundled ffmpeg is 5.0.1, and it does not
+  read a still HEIC or AVIF, so a HEIC or an AVIF is copied unchanged on Linux,
+  even under `force: true`.
 - A failed encode is not an error. The plugin prints a warning and copies the
   source.
 

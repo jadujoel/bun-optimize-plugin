@@ -41,7 +41,9 @@ input, and no alternative codec behind an option. An asset produces one file.
   versions. The single-format rule accepts this.
 - SVG minification needs a dependency. None is chosen yet, so SVG is copied
   unchanged.
-- `Bun.Image` cannot decode TIFF on Linux.
+- `Bun.Image` cannot decode TIFF, HEIC, or AVIF on Linux. TIFF falls back to
+  ffmpeg. The bundled ffmpeg 5.0.1 does not read a still HEIC or AVIF, so those
+  two are copied unchanged on Linux.
 - Quality settings, target resolutions, and `srcset` generation are not
   specified yet.
 - `Bun.Image.placeholder()` returns a ThumbHash data URL of about 500 bytes.
