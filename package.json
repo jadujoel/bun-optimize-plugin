@@ -10,6 +10,10 @@
   "exports": {
     ".": "./index.ts"
   },
+  "repository": {
+		"type": "git",
+		"url": "https://github.com/jadujoel/bun-optimize-plugin"
+	},
   "private": false,
   "publishConfig": {
     "access": "public"
