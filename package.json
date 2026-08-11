@@ -1,0 +1,17 @@
+{
+  "name": "@jaudjoel/bun-optimize-plugin",
+  "module": "index.ts",
+  "type": "module",
+  "scripts": {
+    "example": "(cd example && bun build.ts)"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "ffmpeg-helper": "0.1.2"
+  }
+}
