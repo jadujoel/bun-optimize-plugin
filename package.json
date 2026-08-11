@@ -11,6 +11,9 @@
     ".": "./index.ts"
   },
   "private": false,
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "index.ts",
     "src",
