@@ -4,7 +4,8 @@ node_modules
 # output
 out
 dist
-*.tgz
+# only the package tarball at the root, never an asset such as example/assets/sample.tgz
+/*.tgz
 
 # code coverage
 coverage

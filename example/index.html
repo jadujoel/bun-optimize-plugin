@@ -1,10 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>bun-optimize-plugin example</title>
+    <link rel="stylesheet" href="./index.css" />
+  </head>
+  <body>
+    <h1>bun-optimize-plugin</h1>
+    <p>
+      Every asset below is referenced by its original extension. The plugin
+      rewrites each reference to the optimized file at build time.
+    </p>
 
-<div>
-  <h2>Apng</h2>
-  <img src="./assets/sample.apng" alt="sample gif" />
-</div>
+    <h2>Still images &rarr; WebP</h2>
+    <section class="grid">
+      <figure>
+        <img src="./assets/sample.png" alt="sample png" width="128" height="128" />
+        <figcaption>png</figcaption>
+      </figure>
+      <figure>
+        <img src="./assets/sample.jpg" alt="sample jpg" width="128" height="128" />
+        <figcaption>jpg</figcaption>
+      </figure>
+      <figure>
+        <img src="./assets/sample.jpeg" alt="sample jpeg" width="128" height="128" />
+        <figcaption>jpeg</figcaption>
+      </figure>
+      <figure>
+        <img src="./assets/sample.avif" alt="sample avif" width="128" height="128" />
+        <figcaption>avif</figcaption>
+      </figure>
+      <figure>
+        <img src="./assets/sample.webp" alt="sample webp" width="128" height="128" />
+        <figcaption>webp</figcaption>
+      </figure>
+    </section>
 
-<div>
-  <h2>Gif</h2>
-  <img src="./assets/sample.gif" alt="sample gif" />
-</div>
+    <h2>Animated images &rarr; animated WebP</h2>
+    <section class="grid">
+      <figure>
+        <img src="./assets/sample.gif" alt="sample gif" width="128" height="128" />
+        <figcaption>gif</figcaption>
+      </figure>
+      <figure>
+        <img src="./assets/sample.apng" alt="sample apng" width="128" height="128" />
+        <figcaption>apng</figcaption>
+      </figure>
+    </section>
+
+    <h2>Video &rarr; WebM, VP9 and Opus</h2>
+    <section class="grid">
+      <figure>
+        <video src="./assets/sample.mov" controls muted playsinline width="240"></video>
+        <figcaption>mov</figcaption>
+      </figure>
+      <figure>
+        <video src="./assets/sample.mp4" controls muted playsinline width="240"></video>
+        <figcaption>mp4</figcaption>
+      </figure>
+      <figure>
+        <video src="./assets/sample.webm" controls muted playsinline width="240"></video>
+        <figcaption>webm</figcaption>
+      </figure>
+    </section>
+
+    <h2>Audio &rarr; WebM, Opus</h2>
+    <section class="grid">
+      <figure>
+        <audio src="./assets/sample.wav" controls></audio>
+        <figcaption>wav</figcaption>
+      </figure>
+      <figure>
+        <audio src="./assets/sample.mp3" controls></audio>
+        <figcaption>mp3</figcaption>
+      </figure>
+      <figure>
+        <audio src="./assets/sample.m4a" controls></audio>
+        <figcaption>m4a</figcaption>
+      </figure>
+      <figure>
+        <audio src="./assets/sample.ogg" controls></audio>
+        <figcaption>ogg</figcaption>
+      </figure>
+      <figure>
+        <audio src="./assets/sample.opus" controls></audio>
+        <figcaption>opus</figcaption>
+      </figure>
+      <figure>
+        <audio src="./assets/sample.caf" controls></audio>
+        <figcaption>caf</figcaption>
+      </figure>
+    </section>
+
+    <h2>Everything else &rarr; copied unchanged</h2>
+    <p>
+      The HTML bundler does not follow <code>&lt;a href&gt;</code>, so these two
+      files reach the bundle through an <code>import</code> in
+      <code>frontend.ts</code>.
+    </p>
+    <section class="grid" id="downloads"></section>
+
+    <script type="module" src="./frontend.ts"></script>
+  </body>
+</html>
