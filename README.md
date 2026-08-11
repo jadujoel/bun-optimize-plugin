@@ -1,4 +1,4 @@
-# @jaudjoel/bun-optimize-plugin
+# @jadujoel/bun-optimize-plugin
 
 A Bun build plugin that optimizes the assets in your bundle. Images become
 WebP. Audio and video become WebM. Everything else is copied unchanged.
@@ -22,7 +22,7 @@ and `import` points at the optimized file. Nothing in your source changes.
 ## Install
 
 ```sh
-bun add @jaudjoel/bun-optimize-plugin
+bun add @jadujoel/bun-optimize-plugin
 ```
 
 The `ffmpeg` binary ships with the `ffmpeg-helper` dependency. No system
@@ -31,7 +31,7 @@ The `ffmpeg` binary ships with the `ffmpeg-helper` dependency. No system
 ## Usage
 
 ```ts
-import { optimizePlugin } from "@jaudjoel/bun-optimize-plugin";
+import { optimizePlugin } from "@jadujoel/bun-optimize-plugin";
 
 await Bun.build({
   entrypoints: ["./index.html"],
@@ -43,7 +43,7 @@ await Bun.build({
 `OptimizePlugin` is the same plugin with the default options.
 
 ```ts
-import { OptimizePlugin } from "@jaudjoel/bun-optimize-plugin";
+import { OptimizePlugin } from "@jadujoel/bun-optimize-plugin";
 ```
 
 ## Formats

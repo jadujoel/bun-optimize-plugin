@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "@jaudjoel/bun-optimize-plugin",
+      "name": "@jadujoel/bun-optimize-plugin",
       "dependencies": {
         "ffmpeg-helper": "0.1.2",
       },

@@ -1,5 +1,5 @@
 {
-  "name": "@jaudjoel/bun-optimize-plugin",
+  "name": "@jadujoel/bun-optimize-plugin",
   "version": "0.1.0",
   "description": "A Bun build plugin that re-encodes images to WebP and audio and video to WebM.",
   "author": "Joel Lof <joel.lof@icloud.com> (https://joellof.com/)",
