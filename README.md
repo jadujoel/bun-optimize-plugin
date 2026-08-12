@@ -95,9 +95,10 @@ says why. A build never fails because of an asset.
    takes the animated path.
 2. **Every image output works in an `<img>` tag.** An animated image becomes an
    animated WebP, never a `.webm`.
-3. **Alpha is preserved for images.** Animated WebP and still WebP carry alpha.
-   VP9 alpha needs `-pix_fmt yuva420p`, which Safari does not play, so a video
-   with alpha loses the alpha channel.
+3. **Alpha is preserved.** Animated WebP and still WebP carry alpha. A video's
+   alpha channel is measured: a channel the source uses is kept as
+   `-pix_fmt yuva420p`, and a channel that is fully opaque is dropped for the
+   smaller file. See [Alpha](#alpha).
 4. **The smallest file that still looks right wins.** Every lossy candidate is
    decoded again and compared to the source pixel for pixel. Anything past the
    gate is discarded, so which quality an asset ships at is measured rather than
@@ -121,6 +122,13 @@ says why. A build never fails because of an asset.
    unchanged asset runs no encoder.
 9. **Metadata is stripped.** EXIF, GPS, and ICC profiles other than sRGB are
    removed. The EXIF orientation is applied first.
+10. **An encode may lose fidelity inside a channel. It may never drop a
+    channel.** An encode that was meant to keep the source's alpha channel and
+    came out without one is refused, and the source ships instead. A second
+    audio track is reported in the log, because only the first one is encoded.
+    A dropped alpha channel used to pass every check here: the runtime matched,
+    the frames matched, and the flattened file was smaller, so rule 6 shipped
+    it. See [Alpha](#alpha).
 
 ## Options
 
@@ -136,12 +144,16 @@ optimizePlugin({
   maxWidth: undefined,
   /** VP9 constant quality, 0 to 63. Lower is better quality. Default 32. */
   videoQuality: 32,
+  /** What to do with a video's alpha channel: auto, keep, or drop. Default auto. */
+  alpha: "auto",
   /** Opus bitrate. Default: 48k mono, 96k stereo, 128k above that. */
   audioBitrate: undefined,
   /** Emit the converted file even when it is larger. Default false. */
   force: false,
   /** Leave any source whose path matches this alone. Default off. */
   exclude: undefined,
+  /** Per-asset options. The first match wins. Default none. */
+  overrides: undefined,
   /** Cache directory. Default node_modules/.cache/bun-optimize-plugin. */
   cacheDir: undefined,
   /** Read the cache but never write it. Default false. */
@@ -219,6 +231,74 @@ the candidate's timeline, and the two pictures at that instant are compared. A
 harmless merge passes. A merge that holds one picture for half a second does
 not. A lossless encode is measured too, because frame merging is a property of
 the encoder and not of the quality setting.
+
+## Alpha
+
+A video's alpha channel is measured, not assumed. Two questions decide it, and
+they are separate.
+
+**Does the source have one?** The pixel format answers that. `yuva420p`,
+`yuva444p12le`, `bgra`, and `rgba` carry a channel. `yuv420p` does not.
+
+**Does the source use one?** Only a measurement answers that, and it is the
+question that matters. A ProRes 4444 export routinely carries a fully opaque
+alpha channel, and dropping that one costs nothing and saves bytes. So the
+lowest alpha value in the whole clip is measured. 255 means the channel is
+unused and it is dropped. Anything lower means the channel is used and it is
+kept as `-pix_fmt yuva420p`.
+
+```
+optimize  assets/rose.mov    87.4 MB -> 1.2 MB (-99%)  vp9 crf32; alpha kept as yuva420p, lowest alpha 0 of 255, which Safari does not play; 60 frames and the alpha channel verified
+optimize  assets/hero.mov    12.1 MB -> 806.4 kB (-93%)  vp9 crf32, opus 96k; the alpha channel is fully opaque, so it was dropped; 300 frames verified
+```
+
+**Keeping the channel loses Safari.** VP9 alpha in a WebM plays in Chrome, Edge,
+and Firefox. Safari wants HEVC with alpha in an MP4, and one asset produces one
+file here, so both cannot ship. `alpha: "auto"` keeps the channel anyway,
+because the other answer is worse in more places: a flattened overlay plays an
+opaque rectangle in every browser, and a `yuva420p` overlay is right everywhere
+except one. Set `alpha: "drop"` to choose the other way, for the whole build or
+for one asset through `overrides`.
+
+| `alpha`  | An unused channel | A used channel                |
+| -------- | ----------------- | ----------------------------- |
+| `"auto"` | dropped           | kept, and Safari loses it     |
+| `"keep"` | kept              | kept, and Safari loses it     |
+| `"drop"` | dropped           | dropped, and the log says so  |
+
+**Whatever the policy, an encode that lost a channel it was meant to keep is
+refused, and the source ships instead.** This is not a policy, it is rule 10.
+It cannot be checked by reading the output's pixel format: Matroska keeps a VP9
+alpha plane in `BlockAdditional` side data, so a WebM carrying a perfectly good
+alpha channel still reports `yuv420p` to a probe and to the native `vp9`
+decoder. The output is decoded with `libvpx-vp9` and the channel is measured
+again.
+
+## Per-asset options
+
+The build's options are wrong for some assets. `overrides` is how one asset is
+told something different. The first entry whose `match` tests true against the
+asset's absolute path wins, and its settings are merged over the build's own.
+
+```ts
+optimizePlugin({
+  maxWidth: 1840,
+  alpha: "drop",
+  overrides: [
+    // No background of its own. The transparent field is the design.
+    { match: /signup-rose\.mov$/, alpha: "keep" },
+    // Flat art, so the default gate would pass a posterised gradient.
+    { match: /\/screenshots\//, gate: STRICT_GATE, maxWidth: 2400 },
+  ],
+});
+```
+
+An override inherits everything it does not name, so the rose above still gets
+`maxWidth: 1840`. `quality`, `gate`, `tryLossless`, `maxWidth`, `videoQuality`,
+`alpha`, `audioBitrate`, and `force` can all be set. `cacheDir`, `concurrency`,
+`verbose`, and `exclude` cannot: those belong to the build and not to an asset.
+The cache key is built from the options an asset was actually encoded with, so
+two assets under one build never share an entry they disagree about.
 
 ## `maxWidth`
 
@@ -313,6 +393,14 @@ optimize  16 assets  274.4 kB -> 91.8 kB (-67%)
   encoded at a constant rate legitimately changes its frame count, so demanding
   equality would refuse correct encodes. The check catches catastrophic loss;
   the runtime check catches re-timing.
+- No single file carries alpha to every browser. See [Alpha](#alpha).
+- Rule 10 is enforced for the alpha channel and reported for audio tracks past
+  the first. Three other channels are neither: an HDR colour volume flattens to
+  bt709 with no tone map, a bit depth above 8 truncates, and subtitle and
+  caption streams are never mapped.
+- Measuring a video's alpha channel costs one extra decode pass. It only runs
+  for a source whose pixel format can hold alpha, so ordinary `yuv420p` footage
+  pays nothing, and the result is cached with everything else.
 
 ## Test
 

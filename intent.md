@@ -23,9 +23,10 @@ The row is chosen by the bytes. See rule 12.
    descriptor, the PNG `acTL` chunk, and the WebP `ANIM` chunk.
 2. Every image output stays usable in an `<img>` tag. Animated WebP is the
    reason. An animated image never becomes a `.webm`.
-3. Preserve alpha. Animated WebP and still WebP carry alpha everywhere. VP9
-   alpha needs `-pix_fmt yuva420p` and Safari does not play it, so a video with
-   alpha loses the alpha channel.
+3. Preserve alpha. Animated WebP and still WebP carry alpha everywhere. A video
+   whose alpha channel is used is encoded `-pix_fmt yuva420p`, which Safari does
+   not play, and one whose alpha channel is opaque is flattened to `yuv420p`.
+   Which of the two it is, is measured. See rule 16 and the `alpha` option.
 4. Measure every lossy candidate, do not assume it. Decode it again and compare
    it to the source over alpha-premultiplied RGBA. A candidate past the gate is
    discarded, so `quality` is a ladder the gate walks and not a setting. A file
@@ -79,6 +80,26 @@ The row is chosen by the bytes. See rule 12.
     resampled image, so a shipped file is judged against the picture it is
     meant to be. Bytes on the wire are not the cost of an oversized image: a
     3911 × 4050 source is 60 MB of resident bitmap and still ships as 329 kB.
+16. **An encode may lose fidelity inside a channel. It may never drop a
+    channel.** A channel is the alpha plane, an audio track, a colour volume, or
+    a timeline. For each one: probe whether the source has it, measure whether
+    the source uses it, and refuse the encode when the output cannot carry it.
+    Never degrade silently.
+
+    The measurement is what makes the rule cheap and what makes it honest. A
+    ProRes 4444 export routinely carries a fully opaque alpha channel, so
+    capability alone would keep an expensive `yuva420p` encode nothing needs,
+    and refusing on capability alone would refuse most of them.
+
+    The refusal is what makes the rule hold. A dropped alpha channel passed
+    every gate this plugin had: the runtime matched, the frames matched, a video
+    stream was there, and the file was smaller, so rule 7 shipped it. So a check
+    per channel, at the same place the frame count is checked.
+
+    An output's own pixel format is not evidence for the alpha check. Matroska
+    keeps a VP9 alpha plane in `BlockAdditional` side data, and a WebM that
+    carries a good one still reports `yuv420p` to a probe and to the native
+    `vp9` decoder. Decode it with `libvpx-vp9` and measure the plane.
 
 ## Caveats to resolve
 
@@ -96,12 +117,21 @@ The row is chosen by the bytes. See rule 12.
   video costs 500 MB of resident buffer for a hash that a stream would give for
   nothing. Nothing else about a large video is loaded, so this is the one place
   the size shows up.
-- `maxWidth` is one number for every asset. A backdrop and a figure drawn at a
-  third of its width want different caps, and `srcset` generation would want
-  several outputs per source, which the one-file-per-asset rule at the top of
-  this document forbids today.
-- The gate is one number for every asset. Flat art wants `STRICT_GATE` and
-  photographs want the default, and nothing here measures which is which.
+- No single file carries alpha to every browser. VP9 alpha in a WebM plays in
+  Chrome, Edge, and Firefox. Safari wants HEVC with alpha in an MP4, and the
+  one-file-per-asset rule forbids shipping both. `alpha: "auto"` keeps the
+  channel and loses Safari, because a flattened overlay plays an opaque
+  rectangle in every browser instead of only in one.
+- Rule 16 is enforced for the alpha plane, and reported but not enforced for
+  audio tracks past the first. Three other channels are neither: an HDR colour
+  volume flattens to bt709 with no tone map, a bit depth above 8 truncates, and
+  subtitle and caption streams are never mapped. The pixel format that rule 16
+  parses for alpha already carries the bit depth, so that one is the next.
+- `maxWidth` and the gate are one number per asset, not per output. `overrides`
+  gives a backdrop and a figure different caps, but `srcset` generation would
+  want several outputs from one source, which the one-file-per-asset rule at the
+  top of this document forbids today. Nothing here measures whether an image is
+  flat art that wants `STRICT_GATE`, so an override has to say so.
 - PNG is never a candidate. Indexed PNG still beats WebP on flat artwork with
   few colours, and which is which is not predictable by eye. Admitting it would
   mean two output containers for still images.

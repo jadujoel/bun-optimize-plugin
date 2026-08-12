@@ -2,8 +2,18 @@ import { mkdir, rename, rm } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import { judgeAnimation } from "./animation.ts";
 import { AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, isAnimated, sniffImageFormat } from "./detect.ts";
-import { countFrames, decodeFrames, ffmpeg, isStillContainer, probe, type Probe } from "./ffmpeg.ts";
-import { encodeKey, type ResolvedOptions } from "./options.ts";
+import {
+  OPAQUE_ALPHA,
+  alphaMinimum,
+  carriesAlpha,
+  countFrames,
+  decodeFrames,
+  ffmpeg,
+  isStillContainer,
+  probe,
+  type Probe,
+} from "./ffmpeg.ts";
+import { encodeKey, optionsFor, type ResolvedOptions } from "./options.ts";
 import { decodePng } from "./png.ts";
 import { compare, describe, image, toPixels, withinGate, type Gate, type Pixels } from "./quality.ts";
 
@@ -444,12 +454,20 @@ function decoderFor(codec: string | undefined): string | undefined {
  *
  * ffmpeg reports success on an encode that dropped most of its frames, so the
  * only proof is a decode of the result.
+ *
+ * `alpha` is rule 16, and it cannot be checked by reading the output's pixel
+ * format. Matroska keeps a VP9 alpha plane in `BlockAdditional` side data, and
+ * a WebM that carries a perfectly good alpha channel still reports `yuv420p` to
+ * `probe` and to the native `vp9` decoder. So the channel is measured through
+ * `libvpx-vp9` instead, and a failed measurement is the answer this check is
+ * here for: it is what a flattened encode looks like.
  */
-async function verifyEncode(
+export async function verifyEncode(
   source: string,
   output: string,
   before: Probe,
   video: boolean,
+  alpha: AlphaRequirement,
 ): Promise<{ ok: true; note: string } | { ok: false; why: string }> {
   const after = await probe(output);
 
@@ -471,7 +489,24 @@ async function verifyEncode(
   if (sourceFrames > 0 && outputFrames < sourceFrames * MIN_FRAME_RATIO) {
     return { ok: false, why: `decoded ${outputFrames} of ${sourceFrames} frames` };
   }
-  return { ok: true, note: `${outputFrames} frames verified` };
+
+  if (!alpha) return { ok: true, note: `${outputFrames} frames verified` };
+  const minimum = await alphaMinimum(output, decoderFor(after.video.codec));
+  if (minimum === undefined) return { ok: false, why: "the result has no alpha channel" };
+  if (alpha === "used" && minimum >= OPAQUE_ALPHA) {
+    return { ok: false, why: "the result's alpha channel is fully opaque" };
+  }
+  return { ok: true, note: `${outputFrames} frames and the alpha channel verified` };
+}
+
+/**
+ * Add what is worth saying about the asset to what was said about the encode.
+ *
+ * Rule 16's reports live here. They are true whether or not a candidate won, so
+ * they are not part of a candidate's own reason.
+ */
+function noted(notes: Array<string | undefined>, kept: Encoded): Encoded {
+  return { ...kept, note: [...notes, kept.note].filter(Boolean).join("; ") || undefined };
 }
 
 /** Keep a verified candidate, or throw the file away and say why. */
@@ -480,9 +515,10 @@ async function verified(
   source: string,
   before: Probe,
   video: boolean,
+  alpha: AlphaRequirement = false,
 ): Promise<Encoded> {
   if (!candidate) return { candidates: [] };
-  const verdict = await verifyEncode(source, candidate.path, before, video);
+  const verdict = await verifyEncode(source, candidate.path, before, video, alpha);
   if (!verdict.ok) {
     await rm(candidate.path, { force: true });
     return { candidates: [], note: `${candidate.reason} rejected — ${verdict.why}` };
@@ -505,6 +541,8 @@ async function encodeAudio(
 ): Promise<Encoded> {
   if (!streams.audio) throw new Error("no audio stream was found");
 
+  const notes = [trackNote(streams)];
+
   // Rule 8: an Opus source is remuxed, never re-encoded. A remux that the
   // container refuses is not fatal, and the encode below is the answer to it.
   if (streams.audio.codec === "opus") {
@@ -515,7 +553,7 @@ async function encodeAudio(
       "remux opus to webm",
     ).catch(() => null);
     const kept = await verified(remux, source, streams, false);
-    if (kept.candidates.length) return kept;
+    if (kept.candidates.length) return noted(notes, kept);
   }
 
   const bitrate = opusBitrate(options, streams.audio.channels);
@@ -530,14 +568,100 @@ async function encodeAudio(
     ],
     `opus ${bitrate}`,
   );
-  return verified(encoded, source, streams, false);
+  return noted(notes, await verified(encoded, source, streams, false));
+}
+
+/**
+ * What the output's alpha channel has to show before the encode may be kept.
+ *
+ * `"used"` is the strong form and it is only available when the source was
+ * measured: an output whose alpha came out fully opaque against a source whose
+ * alpha was not is a flattened encode wearing an alpha channel. `"present"` is
+ * for the encodes that were never measured, where an opaque result is the
+ * faithful one and only a missing channel is a failure.
+ */
+export type AlphaRequirement = false | "present" | "used";
+
+/** What the encode does about alpha, and what the log should say about it. */
+interface AlphaPlan {
+  /** The pixel format to hand `libvpx-vp9`. */
+  pixelFormat: "yuv420p" | "yuva420p";
+  required: AlphaRequirement;
+  note?: string;
+}
+
+/** Said about every encode that keeps alpha, because it is the cost of keeping it. */
+const SAFARI = "which Safari does not play";
+
+/**
+ * Decide what happens to the source's alpha channel. Rule 16.
+ *
+ * Two things have to be true before the channel is kept, and they are separate
+ * questions. The source has to have one, which the pixel format answers. The
+ * source has to use one, which only a measurement answers: a ProRes 4444
+ * export routinely carries a fully opaque alpha channel, and flattening that
+ * one costs nothing and saves bytes. The measurement is why `"auto"` is not
+ * merely a guess.
+ *
+ * A VP9 source is measured even when its pixel format says `yuv420p`, because
+ * for VP9 in Matroska the pixel format is not evidence. This only happens on
+ * the encode path: a copy carries the side data across untouched.
+ *
+ * An unreadable measurement is read two ways on purpose. When the format
+ * declares an alpha channel, a measurement that did not run is a failure, and
+ * the channel is kept rather than guessed away. When the format declares none
+ * and the codec merely could be hiding one, the same silence is the ordinary
+ * answer for a file with no alpha at all, because `alphaextract` refuses a
+ * frame it cannot take an alpha plane from.
+ */
+async function planAlpha(source: string, streams: Probe, options: ResolvedOptions): Promise<AlphaPlan> {
+  const declared = carriesAlpha(streams.video?.pixelFormat);
+  const hidden = streams.video?.codec === "vp9";
+  if (!declared && !hidden) return { pixelFormat: "yuv420p", required: false };
+
+  if (options.alpha === "drop") {
+    const note = declared ? "the alpha channel was dropped, because `alpha` is `drop`" : undefined;
+    return { pixelFormat: "yuv420p", required: false, note };
+  }
+  if (options.alpha === "keep" && declared) {
+    return { pixelFormat: "yuva420p", required: "present", note: `alpha kept as yuva420p, ${SAFARI}` };
+  }
+
+  const minimum = await alphaMinimum(source, decoderFor(streams.video?.codec));
+  if (minimum === undefined) {
+    if (!declared) return { pixelFormat: "yuv420p", required: false };
+    return {
+      pixelFormat: "yuva420p",
+      required: "present",
+      note: `the alpha channel could not be measured, so it was kept as yuva420p, ${SAFARI}`,
+    };
+  }
+  if (minimum >= OPAQUE_ALPHA) {
+    return { pixelFormat: "yuv420p", required: false, note: "the alpha channel is fully opaque, so it was dropped" };
+  }
+  return {
+    pixelFormat: "yuva420p",
+    required: "used",
+    note: `alpha kept as yuva420p, lowest alpha ${minimum} of ${OPAQUE_ALPHA}, ${SAFARI}`,
+  };
+}
+
+/**
+ * What to say about the audio tracks past the first one.
+ *
+ * Only one is ever encoded. A second one is a described audio track or another
+ * language often enough that losing it without a word is the alpha mistake
+ * again, at a smaller size.
+ */
+function trackNote(streams: Probe): string | undefined {
+  const tracks = streams.audioTracks ?? 0;
+  return tracks > 1 ? `${tracks} audio tracks, only the first was kept` : undefined;
 }
 
 /**
  * Encode video to VP9 plus Opus in WebM.
  *
- * Rule 3: VP9 alpha needs `-pix_fmt yuva420p`, and Safari does not play it, so
- * `yuv420p` is forced and a source with alpha loses the alpha channel.
+ * Rule 16: the alpha channel is measured, not assumed. See `planAlpha`.
  */
 async function encodeVideo(
   source: string,
@@ -571,25 +695,33 @@ async function encodeVideo(
       reason,
     );
 
+  const notes = [trackNote(streams)];
+
   // Rule 8: a picture already in a WebM codec is copied, never re-encoded. That
   // covers VP9 or AV1 in an MP4, and a VP9 MKV that only wants the WebM name. A
   // copy the muxer refuses, or one that fails verification, falls through to the
   // encode below rather than losing the asset.
+  //
+  // A copy needs no alpha check. It moves the coded picture across untouched,
+  // side data included, so there is no encoder in the path to lose anything.
   if (TARGET_VIDEO_CODECS.has(streams.video.codec)) {
     const copied = await run(["-c:v", "copy"], `${streams.video.codec} copied to webm${audioSaid}`).catch(() => null);
     const kept = await verified(copied, source, streams, true);
-    if (kept.candidates.length) return kept;
+    if (kept.candidates.length) return noted(notes, kept);
   }
+
+  const plan = await planAlpha(source, streams, options);
+  notes.push(plan.note);
 
   const encoded = await run(
     // prettier-ignore
     [
       "-c:v", "libvpx-vp9", "-crf", String(options.videoQuality), "-b:v", "0",
-      "-row-mt", "1", "-pix_fmt", "yuv420p",
+      "-row-mt", "1", "-pix_fmt", plan.pixelFormat,
     ],
     `vp9 crf${options.videoQuality}${audioSaid}`,
   );
-  return verified(encoded, source, streams, true);
+  return noted(notes, await verified(encoded, source, streams, true, plan.required));
 }
 
 /**
@@ -638,9 +770,13 @@ async function encodeCandidates(
  * Optimize one asset and return the file the bundler should emit.
  *
  * The result is cached under the content hash of the source plus the encode
- * options, so a rebuild never runs ffmpeg twice for the same bytes.
+ * options, so a rebuild never runs ffmpeg twice for the same bytes. An asset an
+ * override claims is encoded with that override's options, and `encodeKey`
+ * reads them, so two assets under one build never share a cache entry they
+ * disagree about.
  */
-export async function optimizeAsset(source: string, options: ResolvedOptions): Promise<OptimizeResult> {
+export async function optimizeAsset(source: string, buildOptions: ResolvedOptions): Promise<OptimizeResult> {
+  const options = optionsFor(source, buildOptions);
   const bytes = new Uint8Array(await Bun.file(source).arrayBuffer());
   const sourceSize = bytes.byteLength;
   const name = basename(source, extname(source));

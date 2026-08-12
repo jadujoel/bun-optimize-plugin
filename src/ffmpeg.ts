@@ -44,12 +44,30 @@ export interface AudioStream {
   channels: number;
 }
 
+export interface VideoStream {
+  codec: string;
+  /**
+   * The pixel format the decoder presents, for example `yuv420p` or
+   * `yuva444p12le`. Undefined when the stream line does not name one.
+   *
+   * This is the decoder's output format and not always the container's. A GIF
+   * reports `bgra` and never `pal8`, and a WebM holding VP9 alpha reports
+   * `yuv420p`. See `carriesAlpha`.
+   */
+  pixelFormat?: string;
+}
+
 export interface Probe {
   /** The demuxer ffmpeg chose, for example `matroska,webm` or `png_pipe`. */
   container?: string;
   /** The first video stream that is footage. Cover art is not footage. */
-  video?: { codec: string };
+  video?: VideoStream;
   audio?: AudioStream;
+  /**
+   * How many audio streams the file holds. Only the first one is ever encoded,
+   * so a file with more than one loses the rest and the log has to say so.
+   */
+  audioTracks?: number;
   /** True when the file carries a still picture as an attachment. */
   coverArt?: boolean;
   /** Runtime in seconds, or undefined when the container does not say. */
@@ -59,6 +77,91 @@ export interface Probe {
 const INPUT_LINE = /^Input #\d+, (.+?), from /m;
 const STREAM_LINE = /Stream #\d+:\d+[^:]*: (Audio|Video): ([A-Za-z0-9_]+)/;
 const DURATION_LINE = /Duration:\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)/;
+const PIXEL_FORMAT = /^[a-z][a-z0-9]*$/;
+
+/**
+ * Pixel formats that carry an alpha channel.
+ *
+ * `yuva` and `gbrap` cover the planar families, including every bit depth.
+ * `ya8` and `ya16le` are grey plus alpha. The four packed permutations are what
+ * a PNG, a TGA, or a GIF decodes to. `rgba64` and `bgra64` start with those
+ * same four letters, so the prefix test covers them too.
+ */
+const ALPHA_FORMATS = /^(yuva|gbrap|ya8|ya16|rgba|argb|abgr|bgra)/;
+
+/**
+ * The pixel format from an ffmpeg video stream line.
+ *
+ * The format is the field after the codec, and the codec field carries its own
+ * parenthesised profile and tag: `Video: prores (4444) (ap4h / 0x68347061),
+ * yuva444p12le(tv, progressive), 320x240`. The format's own parentheses hold a
+ * comma, so the fields after it are fragments and only the early ones are
+ * worth reading. Each candidate is checked against the shape of a format name,
+ * which is what stops `320x240` or a bitrate from being read as one.
+ */
+export function pixelFormatOf(line: string): string | undefined {
+  const marker = line.indexOf(": Video: ");
+  if (marker === -1) return undefined;
+  const fields = line.slice(marker + ": Video: ".length).split(",");
+  for (const field of fields.slice(1, 4)) {
+    const name = field.trim().split("(")[0]!.trim();
+    if (PIXEL_FORMAT.test(name)) return name;
+  }
+  return undefined;
+}
+
+/**
+ * True when `format` can hold an alpha channel at all.
+ *
+ * Capability, not use. A ProRes 4444 export routinely carries a fully opaque
+ * alpha channel, and dropping that one costs nothing. `alphaMinimum` is what
+ * separates the two.
+ */
+export function carriesAlpha(format: string | undefined): boolean {
+  return format !== undefined && ALPHA_FORMATS.test(format);
+}
+
+/** The alpha value of a fully opaque pixel, on the 8-bit scale `alphaMinimum` reports. */
+export const OPAQUE_ALPHA = 255;
+
+/**
+ * The lowest alpha value anywhere in `file`, from 0 to 255.
+ *
+ * `undefined` means the measurement did not run, and for this filter chain that
+ * is the same answer as "there is no alpha channel": `alphaextract` refuses a
+ * frame it cannot take an alpha plane from and the whole run fails with
+ * `Failed to inject frame into filter network`. A caller that already knows the
+ * source declares an alpha channel should read `undefined` as a failure, and
+ * one that is guessing should read it as an absence. See `alphaPlan`.
+ *
+ * `format=gray` is not optional. Without it a 12-bit source reports its minimum
+ * on a 16-bit scale, and 65328 against a maximum that moves with the bit depth
+ * is not a number anything can compare.
+ *
+ * `decoder` matters for the same reason it matters to `countFrames`: Matroska
+ * keeps a VP9 alpha plane in side data that only `libvpx-vp9` reads.
+ */
+export async function alphaMinimum(file: string, decoder?: string): Promise<number | undefined> {
+  const flags = decoder ? ["-c:v", decoder] : [];
+  const { stderr } = await ffmpeg([
+    ...flags,
+    "-i",
+    file,
+    "-vf",
+    "alphaextract,format=gray,signalstats,metadata=print:key=lavfi.signalstats.YMIN",
+    "-f",
+    "null",
+    "-",
+  ]);
+  // Reduced rather than spread into `Math.min`, because a long clip reports one
+  // line per frame and an argument list is not the place to put 18000 of them.
+  let lowest: number | undefined;
+  for (const match of stderr.matchAll(/lavfi\.signalstats\.YMIN=(\d+)/g)) {
+    const value = Number(match[1]);
+    if (lowest === undefined || value < lowest) lowest = value;
+  }
+  return lowest;
+}
 
 /**
  * Demuxers that only ever read one picture.
@@ -125,14 +228,19 @@ export async function countFrames(file: string, decoder?: string): Promise<numbe
 export async function probe(file: string): Promise<Probe> {
   const { stderr } = await ffmpeg(["-i", file]);
   const result: Probe = { container: stderr.match(INPUT_LINE)?.[1], duration: reportDuration(stderr) };
+  let audioTracks = 0;
   for (const line of stderr.split("\n")) {
     const match = line.match(STREAM_LINE);
     if (!match) continue;
     const [, type, codec] = match as unknown as [string, "Audio" | "Video", string];
     if (type === "Video" && line.includes("(attached pic)")) result.coverArt = true;
-    else if (type === "Video" && !result.video) result.video = { codec };
-    if (type === "Audio" && !result.audio) result.audio = { codec, channels: channelsOf(line) };
+    else if (type === "Video" && !result.video) result.video = { codec, pixelFormat: pixelFormatOf(line) };
+    if (type === "Audio") {
+      audioTracks++;
+      if (!result.audio) result.audio = { codec, channels: channelsOf(line) };
+    }
   }
+  if (audioTracks) result.audioTracks = audioTracks;
   return result;
 }
 

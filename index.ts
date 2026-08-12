@@ -4,10 +4,10 @@ import { AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS } from "./src/dete
 import { resolveOptions, type OptimizeOptions } from "./src/options.ts";
 import { optimizeAsset, type OptimizeResult } from "./src/optimize.ts";
 
-export type { OptimizeOptions } from "./src/options.ts";
+export type { AlphaPolicy, OptimizeOptions, OptimizeOverride } from "./src/options.ts";
 export type { OptimizeResult } from "./src/optimize.ts";
 export type { Gate } from "./src/quality.ts";
-export { ffmpegPath } from "./src/ffmpeg.ts";
+export { carriesAlpha, ffmpegPath } from "./src/ffmpeg.ts";
 export { isAnimated, sniffImageFormat } from "./src/detect.ts";
 export { optimizeAsset } from "./src/optimize.ts";
 export { DEFAULT_GATE, STRICT_GATE } from "./src/quality.ts";

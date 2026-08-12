@@ -178,6 +178,23 @@ test("a file that cannot be decoded is kept, not thrown on", async () => {
   expect(result.reason).toContain("encode failed");
 });
 
+test("a file with a second audio track loses it, and the log says so", async () => {
+  // Rule 16 reports this one rather than refusing it. Only the first track is
+  // ever encoded, and a second track is a described audio track or another
+  // language often enough that losing it without a word is not acceptable.
+  const source = join(CACHE, "two-tracks.mp4");
+  await mkdir(CACHE, { recursive: true });
+  const wav = join(ASSETS, "sample.wav");
+  await ffmpeg(["-y", "-i", wav, "-i", join(ASSETS, "sample.mp3"), "-map", "0:a", "-map", "1:a", "-c:a", "aac", source]);
+
+  const result = await optimizeAsset(source, forced);
+  expect(extname(result.path)).toBe(".webm");
+  expect(result.reason).toContain("2 audio tracks, only the first was kept");
+
+  const one = await optimizeAsset(wav, forced);
+  expect(one.reason).not.toContain("audio tracks");
+});
+
 test("a changed quality setting misses the cache", async () => {
   const source = join(ASSETS, "sample.jpg");
   const pinned = { cacheDir: CACHE, tryLossless: false, gate: false as const };
